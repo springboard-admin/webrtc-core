@@ -304,6 +304,7 @@ export const RtcCall = ({
   const sessionIdRef = useRef<string | null>(null);
   const myJoinedAtRef = useRef<Date | null>(null);
   const bothConnectedAtRef = useRef<Date | null>(null);
+  const connectedAtWrittenRef = useRef(false);
   const creatingSessionRef = useRef(false);
   const wasConnectedRef = useRef(false);
   const elapsedTimerStartedRef = useRef(false);
@@ -1147,6 +1148,18 @@ export const RtcCall = ({
         setConnectionStalled(false);
         wasConnectedRef.current = true;
         bothConnectedAtRef.current = new Date();
+        // Stamp connected_at once (first time the call is two-way connected) so
+        // the generic participant row carries a real talk-time start. Talk/overlap
+        // duration is then derivable per call as min(left_at) - max(connected_at),
+        // for ANY roles — no redundant precomputed column needed.
+        if (!connectedAtWrittenRef.current && sessionIdRef.current) {
+          connectedAtWrittenRef.current = true;
+          void supabase
+            .from("call_participants")
+            .update({ connected_at: new Date().toISOString() })
+            .eq("call_id", sessionIdRef.current)
+            .eq("participant_id", participantId);
+        }
         startElapsedTimer();
         logTelemetry("peer_connected");
         if (joinIntervalRef.current) {
