@@ -1,5 +1,10 @@
 node_modules/
-dist/
+# Commit the consumable build output so bun consumers can install via
+# github:springboard-admin/webrtc-core without a build step (bun does not
+# install devDeps / run prepare for git deps). Keep the heavy source map out.
+dist/*
+!dist/index.js
+!dist/index.d.ts
 *.log
 .DS_Store
 .env
