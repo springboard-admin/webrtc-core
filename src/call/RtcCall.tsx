@@ -377,6 +377,18 @@ export const RtcCall = ({
   // Media-ready gating: mentor waits for peer's media-ready (or 10s) before sending offer.
   const peerMediaReadyRef = useRef(false);
   const mediaReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Peer-instance epoch. Identifies one RTCPeerConnection instance so the peer
+  // can tell a page refresh / PC rebuild apart from the stable sessionId (which
+  // survives a refresh). myEpoch is minted per createPeerConnection(); the peer
+  // stamps its own on every signaling message and we track it as remoteEpoch.
+  // A changed remoteEpoch while our PC is already DTLS-bonded means the peer we
+  // were talking to is gone — a fresh peer cannot re-DTLS onto our old PC, so
+  // its video freezes on the last frame. Detecting the change lets us rebuild.
+  const myEpochRef = useRef<string>("");
+  const remoteEpochRef = useRef<string | null>(null);
+  // Sustained-freeze recovery: frames stalled while still "connected" (Fix 2).
+  const frozenStreakRef = useRef(0);
   const peerOnPageChimedRef = useRef(false);
   // Remote autoplay resilience: persistent play() retry + silent gesture net.
   const remotePlayRetryRef = useRef<NodeJS.Timeout | null>(null);
@@ -831,6 +843,13 @@ export const RtcCall = ({
     }
 
     // Reset signaling state
+    // Mint a fresh epoch for this PC instance so the peer can detect that our
+    // previous instance is gone (page refresh, or a local rebuild) and drop the
+    // now-dead DTLS bond on its side.
+    myEpochRef.current =
+      (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${participantRole}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
     offerSentRef.current = false;
     iceCandidateBufferRef.current = [];
     needsRestartRef.current = false;
@@ -1043,7 +1062,7 @@ export const RtcCall = ({
         channelRef.current.send({
           type: "broadcast",
           event: "ice-candidate",
-          payload: { candidate: e.candidate.toJSON(), from: participantRole },
+          payload: { candidate: e.candidate.toJSON(), from: participantRole, epoch: myEpochRef.current },
         });
       }
     };
@@ -1382,7 +1401,7 @@ export const RtcCall = ({
       channelRef.current?.send({
         type: "broadcast",
         event: "sdp-offer",
-        payload: { sdp: pc.localDescription, from: participantRole },
+        payload: { sdp: pc.localDescription, from: participantRole, epoch: myEpochRef.current },
       });
 
       // Start connection timeout — INITIAL connect only. Once we've connected
@@ -1439,6 +1458,40 @@ export const RtcCall = ({
     }
   }, [isScreenSharing, participantRole]);
 
+  // Peer-instance change detector. Called at the top of every inbound signaling
+  // handler with the sender's epoch. If the peer is a DIFFERENT instance than
+  // the one our PC is DTLS-bonded to (they refreshed / rebuilt), we must rebuild
+  // our PC too — a fresh peer cannot re-handshake onto our old bonded PC, which
+  // is the "frozen remote video after refresh" bug. The remoteDescription==null
+  // guard prevents a rebuild ping-pong: a peer that just rebuilt has a fresh PC,
+  // so it adopts our new epoch without rebuilding again.
+  const onPeerEpoch = useCallback((epoch?: string) => {
+    if (!epoch) return;                          // legacy peer without epoch
+    const prev = remoteEpochRef.current;
+    if (prev === epoch) return;                  // same instance — nothing to do
+    remoteEpochRef.current = epoch;              // adopt the peer's current instance
+    if (prev === null) return;                   // first sighting — just handshake
+    const pc = pcRef.current;
+    if (!pc || pc.remoteDescription == null) return; // our PC is fresh — adopt, no rebuild
+    log(participantRole, `🔄 peer epoch changed (${prev} → ${epoch}) — rebuilding PC`);
+    logTelemetry("peer_epoch_changed", { role: participantRole });
+    needsRestartRef.current = true;
+    offerSentRef.current = false;
+    peerMediaReadyRef.current = false;
+    revertScreenShareOnReconnect();
+    createPeerConnection();
+    setPeerDisconnected(false);
+    if (isInitiator) {
+      setTimeout(() => sendOffer(), 50);
+    } else {
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "join",
+        payload: { from: participantRole, epoch: myEpochRef.current },
+      });
+    }
+  }, [participantRole, isInitiator, createPeerConnection, sendOffer, revertScreenShareOnReconnect]);
+
   // === Serialized mid-call reconnection controller ===
   // The single owner of ALL post-connection recovery (replaces the old three
   // racing mechanisms — inline ICE restart + connection-timeout rebuild +
@@ -1490,7 +1543,7 @@ export const RtcCall = ({
         revertScreenShareOnReconnect();
         createPeerConnection();
       }
-      channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole } });
+      channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
     }
 
     const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
@@ -1651,6 +1704,45 @@ export const RtcCall = ({
             const dFramesDecoded = prev.framesDecoded != null ? Math.max(0, recvFramesDecoded - prev.framesDecoded) : null;
             const peerSendingVideo = hasActiveRemoteVideo;
             const frozen = peerSendingVideo && dFramesDecoded === 0;
+            // Fix 2: sustained-freeze recovery. Frames stalled while the PC still
+            // reports "connected" is exactly the media stall that connectionState
+            // can't see (a wedged media path on an otherwise-live peer). The
+            // serialized reconnect controller can't help here — it bails while
+            // "connected" — so we directly do an ICE restart (mirrors
+            // runReconnectAttempt's cheap path). Require sustained evidence
+            // (3 polls ≈ 15s). Deliberately NOT setParameters() — that 5s churn
+            // caused freezes and stays removed.
+            if (frozen && pc.connectionState === "connected") {
+              frozenStreakRef.current++;
+              if (frozenStreakRef.current >= 3) {
+                frozenStreakRef.current = 0;
+                log(participantRole, "🧊 sustained frozen frames — ICE restart");
+                logTelemetry("frozen_recovery_triggered", { role: participantRole });
+                if (isInitiator) {
+                  iceRestartAttemptedRef.current = true;
+                  try { pc.restartIce(); } catch { /* ignore */ }
+                  offerSentRef.current = false;
+                  sendOffer();
+                } else {
+                  // Answerer can't force the offerer to re-offer (the mentor
+                  // ignores join while it still reads "connected"). Rebuild our
+                  // PC instead: the fresh epoch makes the mentor's onPeerEpoch
+                  // fire, so it rebuilds and re-offers to our new instance.
+                  needsRestartRef.current = true;
+                  offerSentRef.current = false;
+                  peerMediaReadyRef.current = false;
+                  revertScreenShareOnReconnect();
+                  createPeerConnection();
+                  channelRef.current?.send({
+                    type: "broadcast",
+                    event: "join",
+                    payload: { from: participantRole, epoch: myEpochRef.current },
+                  });
+                }
+              }
+            } else {
+              frozenStreakRef.current = 0;
+            }
             const collapsed = peerSendingVideo && recvBitrate > 0 && recvBitrate < STRENGTH_BITRATE_RED_BPS;
             let rawStrength: "green" | "yellow" | "red" = "green";
             if (frozen || collapsed || downLoss > STRENGTH_LOSS_RED || (rtt > STRENGTH_RTT_RED_S && dRecvPkts > 0)) {
@@ -1922,6 +2014,7 @@ export const RtcCall = ({
       channel
         .on("broadcast", { event: "sdp-offer" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           log(participantRole, "📥 Received SDP offer from", payload.from);
           logTelemetry("signaling_offer_received", { from: payload.from });
 
@@ -1957,7 +2050,7 @@ export const RtcCall = ({
               channel.send({
                 type: "broadcast",
                 event: "sdp-answer",
-                payload: { sdp: pc.localDescription, from: participantRole },
+                payload: { sdp: pc.localDescription, from: participantRole, epoch: myEpochRef.current },
               });
             }
           } catch (err) {
@@ -1966,6 +2059,7 @@ export const RtcCall = ({
         })
         .on("broadcast", { event: "sdp-answer" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           try {
             logTelemetry("signaling_answer_received", { from: payload.from });
             const currentPc = pcRef.current;
@@ -1978,6 +2072,11 @@ export const RtcCall = ({
         })
         .on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          // Drop candidates from a dead peer instance. We do NOT adopt the epoch
+          // here (ICE is high-frequency; late stragglers must not flip remoteEpoch
+          // and trigger a spurious rebuild). Adoption happens on join/offer/answer/
+          // media-ready, which converge to the live instance within ~1s of join.
+          if (payload.epoch && remoteEpochRef.current && payload.epoch !== remoteEpochRef.current) return;
           try {
             // Track remote candidate types for diagnostics (passive)
             try { diagnosticsRef.current?.noteRemoteCandidate(payload.candidate); } catch {}
@@ -2003,6 +2102,7 @@ export const RtcCall = ({
         })
         .on("broadcast", { event: "join" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           log(participantRole, "📥 JOIN from", payload.from);
           // Flag-independent "peer is here right now" signal: refreshed on every
           // join ping (peer pings ~1s while unconnected). Drives the connecting
@@ -2064,6 +2164,7 @@ export const RtcCall = ({
         })
         .on("broadcast", { event: "media-ready" }, ({ payload }) => {
           if (payload?.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           if (peerMediaReadyRef.current) return;
           log(participantRole, "📥 Peer media-ready received");
           peerMediaReadyRef.current = true;
@@ -2094,7 +2195,7 @@ export const RtcCall = ({
             channel.send({
               type: "broadcast",
               event: "join",
-              payload: { from: participantRole },
+              payload: { from: participantRole, epoch: myEpochRef.current },
             });
 
             // Announce that our local media is attached to the PC. The mentor
@@ -2104,7 +2205,7 @@ export const RtcCall = ({
             channel.send({
               type: "broadcast",
               event: "media-ready",
-              payload: { from: participantRole },
+              payload: { from: participantRole, epoch: myEpochRef.current },
             });
 
             // Mentor is the offerer. Gate the first offer on peer media-ready;
@@ -2138,7 +2239,7 @@ export const RtcCall = ({
               channel.send({
                 type: "broadcast",
                 event: "join",
-                payload: { from: participantRole },
+                payload: { from: participantRole, epoch: myEpochRef.current },
               });
             }, 1000);
           }

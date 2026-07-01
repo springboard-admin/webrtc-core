@@ -1952,6 +1952,9 @@ var RtcCall = ({
   const stopReconnectRef = useRef(null);
   const peerMediaReadyRef = useRef(false);
   const mediaReadyTimerRef = useRef(null);
+  const myEpochRef = useRef("");
+  const remoteEpochRef = useRef(null);
+  const frozenStreakRef = useRef(0);
   useRef(false);
   const remotePlayRetryRef = useRef(null);
   const remoteGestureHookedRef = useRef(false);
@@ -2292,6 +2295,7 @@ var RtcCall = ({
       pcRef.current.close();
       pcRef.current = null;
     }
+    myEpochRef.current = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${participantRole}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
     offerSentRef.current = false;
     iceCandidateBufferRef.current = [];
     needsRestartRef.current = false;
@@ -2463,7 +2467,7 @@ var RtcCall = ({
         channelRef.current.send({
           type: "broadcast",
           event: "ice-candidate",
-          payload: { candidate: e.candidate.toJSON(), from: participantRole }
+          payload: { candidate: e.candidate.toJSON(), from: participantRole, epoch: myEpochRef.current }
         });
       }
     };
@@ -2732,7 +2736,7 @@ var RtcCall = ({
       channelRef.current?.send({
         type: "broadcast",
         event: "sdp-offer",
-        payload: { sdp: pc.localDescription, from: participantRole }
+        payload: { sdp: pc.localDescription, from: participantRole, epoch: myEpochRef.current }
       });
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       connectionTimeoutRef.current = setTimeout(() => {
@@ -2778,6 +2782,32 @@ var RtcCall = ({
       setupVideoEl(localVideoRef.current, localStreamRef.current, true);
     }
   }, [isScreenSharing, participantRole]);
+  const onPeerEpoch = useCallback((epoch) => {
+    if (!epoch) return;
+    const prev = remoteEpochRef.current;
+    if (prev === epoch) return;
+    remoteEpochRef.current = epoch;
+    if (prev === null) return;
+    const pc = pcRef.current;
+    if (!pc || pc.remoteDescription == null) return;
+    log(participantRole, `\u{1F504} peer epoch changed (${prev} \u2192 ${epoch}) \u2014 rebuilding PC`);
+    logTelemetry("peer_epoch_changed", { role: participantRole });
+    needsRestartRef.current = true;
+    offerSentRef.current = false;
+    peerMediaReadyRef.current = false;
+    revertScreenShareOnReconnect();
+    createPeerConnection();
+    setPeerDisconnected(false);
+    if (isInitiator) {
+      setTimeout(() => sendOffer(), 50);
+    } else {
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "join",
+        payload: { from: participantRole, epoch: myEpochRef.current }
+      });
+    }
+  }, [participantRole, isInitiator, createPeerConnection, sendOffer, revertScreenShareOnReconnect]);
   const RECONNECT_BACKOFF_MS = [3e3, 5e3, 8e3, 12e3];
   const RECONNECT_ESCALATE_MS = 3e5;
   const stopReconnect = () => {
@@ -2825,7 +2855,7 @@ var RtcCall = ({
         revertScreenShareOnReconnect();
         createPeerConnection();
       }
-      channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole } });
+      channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
     }
     const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
     reconnectTimerRef.current = setTimeout(runReconnectAttempt, delay);
@@ -2947,6 +2977,36 @@ var RtcCall = ({
             const dFramesDecoded = prev.framesDecoded != null ? Math.max(0, recvFramesDecoded - prev.framesDecoded) : null;
             const peerSendingVideo = hasActiveRemoteVideo;
             const frozen = peerSendingVideo && dFramesDecoded === 0;
+            if (frozen && pc.connectionState === "connected") {
+              frozenStreakRef.current++;
+              if (frozenStreakRef.current >= 3) {
+                frozenStreakRef.current = 0;
+                log(participantRole, "\u{1F9CA} sustained frozen frames \u2014 ICE restart");
+                logTelemetry("frozen_recovery_triggered", { role: participantRole });
+                if (isInitiator) {
+                  iceRestartAttemptedRef.current = true;
+                  try {
+                    pc.restartIce();
+                  } catch {
+                  }
+                  offerSentRef.current = false;
+                  sendOffer();
+                } else {
+                  needsRestartRef.current = true;
+                  offerSentRef.current = false;
+                  peerMediaReadyRef.current = false;
+                  revertScreenShareOnReconnect();
+                  createPeerConnection();
+                  channelRef.current?.send({
+                    type: "broadcast",
+                    event: "join",
+                    payload: { from: participantRole, epoch: myEpochRef.current }
+                  });
+                }
+              }
+            } else {
+              frozenStreakRef.current = 0;
+            }
             const collapsed = peerSendingVideo && recvBitrate > 0 && recvBitrate < STRENGTH_BITRATE_RED_BPS;
             let rawStrength = "green";
             if (frozen || collapsed || downLoss > STRENGTH_LOSS_RED || rtt > STRENGTH_RTT_RED_S && dRecvPkts > 0) {
@@ -3167,6 +3227,7 @@ var RtcCall = ({
         channelRef.current = channel;
         channel.on("broadcast", { event: "sdp-offer" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           log(participantRole, "\u{1F4E5} Received SDP offer from", payload.from);
           logTelemetry("signaling_offer_received", { from: payload.from });
           const curPc = pcRef.current;
@@ -3195,7 +3256,7 @@ var RtcCall = ({
               channel.send({
                 type: "broadcast",
                 event: "sdp-answer",
-                payload: { sdp: pc.localDescription, from: participantRole }
+                payload: { sdp: pc.localDescription, from: participantRole, epoch: myEpochRef.current }
               });
             }
           } catch (err) {
@@ -3203,6 +3264,7 @@ var RtcCall = ({
           }
         }).on("broadcast", { event: "sdp-answer" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           try {
             logTelemetry("signaling_answer_received", { from: payload.from });
             const currentPc = pcRef.current;
@@ -3214,6 +3276,7 @@ var RtcCall = ({
           }
         }).on("broadcast", { event: "ice-candidate" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          if (payload.epoch && remoteEpochRef.current && payload.epoch !== remoteEpochRef.current) return;
           try {
             try {
               diagnosticsRef.current?.noteRemoteCandidate(payload.candidate);
@@ -3238,6 +3301,7 @@ var RtcCall = ({
           }
         }).on("broadcast", { event: "join" }, async ({ payload }) => {
           if (payload.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           log(participantRole, "\u{1F4E5} JOIN from", payload.from);
           lastPeerJoinAtRef.current = Date.now();
           setPeerPresent(true);
@@ -3274,6 +3338,7 @@ var RtcCall = ({
           });
         }).on("broadcast", { event: "media-ready" }, ({ payload }) => {
           if (payload?.from === participantRole) return;
+          onPeerEpoch(payload.epoch);
           if (peerMediaReadyRef.current) return;
           log(participantRole, "\u{1F4E5} Peer media-ready received");
           peerMediaReadyRef.current = true;
@@ -3294,12 +3359,12 @@ var RtcCall = ({
             channel.send({
               type: "broadcast",
               event: "join",
-              payload: { from: participantRole }
+              payload: { from: participantRole, epoch: myEpochRef.current }
             });
             channel.send({
               type: "broadcast",
               event: "media-ready",
-              payload: { from: participantRole }
+              payload: { from: participantRole, epoch: myEpochRef.current }
             });
             if (isInitiator) {
               if (peerMediaReadyRef.current) {
@@ -3326,7 +3391,7 @@ var RtcCall = ({
               channel.send({
                 type: "broadcast",
                 event: "join",
-                payload: { from: participantRole }
+                payload: { from: participantRole, epoch: myEpochRef.current }
               });
             }, 1e3);
           }
