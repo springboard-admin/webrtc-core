@@ -1765,7 +1765,6 @@ async function getIceServers(supabase) {
   }
 }
 var CONNECTION_TIMEOUT_MS = 15e3;
-var MAX_RETRY_ATTEMPTS = 3;
 var HEALTH_CHECK_INTERVAL_MS = 5e3;
 var DISCONNECT_THRESHOLD_MS = 25e3;
 var CONNECTING_THRESHOLD_MS = 2e4;
@@ -1949,6 +1948,7 @@ var RtcCall = ({
   const reconnectAttemptRef = useRef(0);
   const reconnectEscalateTimerRef = useRef(null);
   const startReconnectRef = useRef(null);
+  const recoveryReasonRef = useRef("");
   const stopReconnectRef = useRef(null);
   const peerMediaReadyRef = useRef(false);
   const mediaReadyTimerRef = useRef(null);
@@ -2295,7 +2295,6 @@ var RtcCall = ({
       pcRef.current.close();
       pcRef.current = null;
     }
-    myEpochRef.current = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${participantRole}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
     offerSentRef.current = false;
     iceCandidateBufferRef.current = [];
     needsRestartRef.current = false;
@@ -2477,21 +2476,7 @@ var RtcCall = ({
     pc.oniceconnectionstatechange = () => {
       log(participantRole, "ICE connection state:", pc.iceConnectionState);
       if (pc.iceConnectionState === "failed") {
-        if (wasConnectedRef.current) {
-          startReconnectRef.current?.();
-        } else if (!iceRestartAttemptedRef.current) {
-          log(participantRole, "ICE failed \u2014 attempting ICE restart");
-          iceRestartAttemptedRef.current = true;
-          pc.restartIce();
-          if (isInitiator) {
-            offerSentRef.current = false;
-            setTimeout(() => sendOffer(), 500);
-          }
-        } else {
-          log(participantRole, "ICE restart already attempted, marking for full PC restart");
-          needsRestartRef.current = true;
-          offerSentRef.current = false;
-        }
+        startReconnectRef.current?.("ice-failed");
       }
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
         iceRestartAttemptedRef.current = false;
@@ -2618,7 +2603,7 @@ var RtcCall = ({
           setIsConnected(false);
           if (wasConnectedRef.current) {
             logTelemetry("peer_disconnected", { connectionState: pc.connectionState });
-            startReconnectRef.current?.();
+            startReconnectRef.current?.("conn-failed");
           }
         } else if (wasConnectedRef.current && !peerDisconnectedTimerRef.current) {
           peerDisconnectedTimerRef.current = setTimeout(() => {
@@ -2628,7 +2613,7 @@ var RtcCall = ({
             if (cur.connectionState !== "connected") {
               setIsConnected(false);
               logTelemetry("peer_disconnected", { connectionState: cur.connectionState });
-              startReconnectRef.current?.();
+              startReconnectRef.current?.("disconnected");
             }
           }, 5e3);
         }
@@ -2741,16 +2726,8 @@ var RtcCall = ({
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       connectionTimeoutRef.current = setTimeout(() => {
         if (wasConnectedRef.current) return;
-        if (pcRef.current?.connectionState !== "connected" && retryCountRef.current < MAX_RETRY_ATTEMPTS) {
-          retryCountRef.current++;
-          log(participantRole, `\u23F1\uFE0F Connection timeout \u2014 retry attempt ${retryCountRef.current}/${MAX_RETRY_ATTEMPTS}`);
-          needsRestartRef.current = true;
-          offerSentRef.current = false;
-          iceRestartAttemptedRef.current = true;
-          createPeerConnection();
-          if (isInitiator) {
-            setTimeout(() => sendOffer(), 500);
-          }
+        if (pcRef.current?.connectionState !== "connected") {
+          startReconnectRef.current?.("stuck-connecting");
         }
       }, CONNECTION_TIMEOUT_MS);
     } catch (err) {
@@ -2790,24 +2767,11 @@ var RtcCall = ({
     if (prev === null) return;
     const pc = pcRef.current;
     if (!pc || pc.remoteDescription == null) return;
-    log(participantRole, `\u{1F504} peer epoch changed (${prev} \u2192 ${epoch}) \u2014 rebuilding PC`);
+    log(participantRole, `\u{1F504} peer epoch changed (${prev} \u2192 ${epoch}) \u2014 recover`);
     logTelemetry("peer_epoch_changed", { role: participantRole });
-    needsRestartRef.current = true;
-    offerSentRef.current = false;
     peerMediaReadyRef.current = false;
-    revertScreenShareOnReconnect();
-    createPeerConnection();
-    setPeerDisconnected(false);
-    if (isInitiator) {
-      setTimeout(() => sendOffer(), 50);
-    } else {
-      channelRef.current?.send({
-        type: "broadcast",
-        event: "join",
-        payload: { from: participantRole, epoch: myEpochRef.current }
-      });
-    }
-  }, [participantRole, isInitiator, createPeerConnection, sendOffer, revertScreenShareOnReconnect]);
+    startReconnectRef.current?.("peer-restart");
+  }, [participantRole]);
   const RECONNECT_BACKOFF_MS = [3e3, 5e3, 8e3, 12e3];
   const RECONNECT_ESCALATE_MS = 3e5;
   const stopReconnect = () => {
@@ -2820,19 +2784,31 @@ var RtcCall = ({
       reconnectEscalateTimerRef.current = null;
     }
     reconnectAttemptRef.current = 0;
+    recoveryReasonRef.current = "";
     setReconnectEscalated(false);
+  };
+  const rebuildAndRenegotiate = () => {
+    needsRestartRef.current = true;
+    iceRestartAttemptedRef.current = true;
+    offerSentRef.current = false;
+    revertScreenShareOnReconnect();
+    createPeerConnection();
+    if (isInitiator) setTimeout(() => sendOffer(), 300);
+    else channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
   };
   const runReconnectAttempt = () => {
     const pc = pcRef.current;
-    if (!pc || pc.connectionState === "connected") {
+    if (!pc) {
       stopReconnect();
       return;
     }
+    const reason = recoveryReasonRef.current;
     reconnectAttemptRef.current++;
     const attempt = reconnectAttemptRef.current;
-    logTelemetry("reconnect_attempt", { attempt, role: participantRole, connectionState: pc.connectionState });
+    const forceRebuild = reason === "peer-restart" || attempt > 2;
+    logTelemetry("reconnect_attempt", { attempt, reason, role: participantRole, connectionState: pc.connectionState });
     if (isInitiator) {
-      if (attempt <= 2 && pc.signalingState !== "closed") {
+      if (!forceRebuild && pc.signalingState !== "closed") {
         iceRestartAttemptedRef.current = true;
         try {
           pc.restartIce();
@@ -2841,36 +2817,36 @@ var RtcCall = ({
         offerSentRef.current = false;
         sendOffer();
       } else {
-        needsRestartRef.current = true;
-        iceRestartAttemptedRef.current = true;
-        offerSentRef.current = false;
-        revertScreenShareOnReconnect();
-        createPeerConnection();
-        setTimeout(() => sendOffer(), 300);
+        rebuildAndRenegotiate();
       }
     } else {
-      const cur = pcRef.current;
-      if (!cur || cur.signalingState === "closed") {
-        needsRestartRef.current = true;
-        revertScreenShareOnReconnect();
-        createPeerConnection();
+      if (forceRebuild || pc.signalingState === "closed") {
+        rebuildAndRenegotiate();
+      } else {
+        channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
       }
-      channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
     }
-    const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
-    reconnectTimerRef.current = setTimeout(runReconnectAttempt, delay);
+    if (pcRef.current && pcRef.current.connectionState !== "connected") {
+      const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
+      reconnectTimerRef.current = setTimeout(runReconnectAttempt, delay);
+    } else {
+      reconnectTimerRef.current = null;
+      reconnectAttemptRef.current = 0;
+    }
   };
-  const startReconnect = () => {
-    if (!wasConnectedRef.current) return;
-    if (pcRef.current?.connectionState === "connected") return;
+  const startReconnect = (reason = "recover") => {
+    const connected = pcRef.current?.connectionState === "connected";
+    const overrideConnected = reason === "peer-restart" || reason === "frozen";
+    if (connected && !overrideConnected) return;
+    if (reconnectTimerRef.current) return;
+    recoveryReasonRef.current = reason;
     setPeerDisconnected(true);
     setIsReconnecting(true);
-    if (reconnectTimerRef.current) return;
     reconnectAttemptRef.current = 0;
     if (reconnectEscalateTimerRef.current) clearTimeout(reconnectEscalateTimerRef.current);
     setReconnectEscalated(false);
     reconnectEscalateTimerRef.current = setTimeout(() => setReconnectEscalated(true), RECONNECT_ESCALATE_MS);
-    logTelemetry("reconnect_started", { role: participantRole });
+    logTelemetry("reconnect_started", { reason, role: participantRole });
     runReconnectAttempt();
   };
   startReconnectRef.current = startReconnect;
@@ -2885,36 +2861,16 @@ var RtcCall = ({
       if (!pc) return;
       if (connectingAtRef.current && pc.connectionState === "connecting") {
         const elapsed = Date.now() - connectingAtRef.current;
-        if (elapsed > CONNECTING_THRESHOLD_MS && retryCountRef.current < MAX_RETRY_ATTEMPTS && !reconnectTimerRef.current) {
-          log(participantRole, `\u26A0\uFE0F Stuck connecting for ${elapsed}ms, forcing restart`);
-          retryCountRef.current++;
+        if (elapsed > CONNECTING_THRESHOLD_MS) {
           connectingAtRef.current = null;
-          needsRestartRef.current = true;
-          offerSentRef.current = false;
-          iceRestartAttemptedRef.current = true;
-          revertScreenShareOnReconnect();
-          createPeerConnection();
-          if (isInitiator) {
-            setTimeout(() => sendOffer(), 500);
-          }
+          startReconnectRef.current?.("stuck-connecting");
         }
       }
       if (disconnectedAtRef.current && (pc.connectionState === "disconnected" || pc.iceConnectionState === "disconnected")) {
         const elapsed = Date.now() - disconnectedAtRef.current;
-        if (elapsed > DISCONNECT_THRESHOLD_MS && pc.iceConnectionState === "failed" && !reconnectTimerRef.current) {
-          log(participantRole, `\u26A0\uFE0F ICE failed for ${elapsed}ms, rebuilding PC`);
+        if (elapsed > DISCONNECT_THRESHOLD_MS && pc.iceConnectionState === "failed") {
           disconnectedAtRef.current = null;
-          if (retryCountRef.current < MAX_RETRY_ATTEMPTS) {
-            retryCountRef.current++;
-            needsRestartRef.current = true;
-            offerSentRef.current = false;
-            iceRestartAttemptedRef.current = true;
-            revertScreenShareOnReconnect();
-            createPeerConnection();
-            if (isInitiator) {
-              setTimeout(() => sendOffer(), 500);
-            }
-          }
+          startReconnectRef.current?.("disconnected");
         } else if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
           disconnectedAtRef.current = null;
         }
@@ -2981,28 +2937,9 @@ var RtcCall = ({
               frozenStreakRef.current++;
               if (frozenStreakRef.current >= 3) {
                 frozenStreakRef.current = 0;
-                log(participantRole, "\u{1F9CA} sustained frozen frames \u2014 ICE restart");
+                log(participantRole, "\u{1F9CA} sustained frozen frames \u2014 recover");
                 logTelemetry("frozen_recovery_triggered", { role: participantRole });
-                if (isInitiator) {
-                  iceRestartAttemptedRef.current = true;
-                  try {
-                    pc.restartIce();
-                  } catch {
-                  }
-                  offerSentRef.current = false;
-                  sendOffer();
-                } else {
-                  needsRestartRef.current = true;
-                  offerSentRef.current = false;
-                  peerMediaReadyRef.current = false;
-                  revertScreenShareOnReconnect();
-                  createPeerConnection();
-                  channelRef.current?.send({
-                    type: "broadcast",
-                    event: "join",
-                    payload: { from: participantRole, epoch: myEpochRef.current }
-                  });
-                }
+                startReconnectRef.current?.("frozen");
               }
             } else {
               frozenStreakRef.current = 0;
@@ -3128,6 +3065,7 @@ var RtcCall = ({
     let mounted = true;
     const init = async () => {
       log(participantRole, "=== INIT START ===");
+      myEpochRef.current = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${participantRole}-${Math.floor(Math.random() * 1e9)}`;
       let stream;
       try {
         log(participantRole, "Requesting media (default video + audio)...");

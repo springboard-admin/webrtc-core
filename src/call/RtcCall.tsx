@@ -371,20 +371,23 @@ export const RtcCall = ({
   const reconnectEscalateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Held in a ref so createPeerConnection's state handlers (defined earlier) can
   // invoke the controller (defined later) without a definition cycle.
-  const startReconnectRef = useRef<(() => void) | null>(null);
+  const startReconnectRef = useRef<((reason?: string) => void) | null>(null);
+  const recoveryReasonRef = useRef<string>("");
   const stopReconnectRef = useRef<(() => void) | null>(null);
 
   // Media-ready gating: mentor waits for peer's media-ready (or 10s) before sending offer.
   const peerMediaReadyRef = useRef(false);
   const mediaReadyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Peer-instance epoch. Identifies one RTCPeerConnection instance so the peer
-  // can tell a page refresh / PC rebuild apart from the stable sessionId (which
-  // survives a refresh). myEpoch is minted per createPeerConnection(); the peer
-  // stamps its own on every signaling message and we track it as remoteEpoch.
-  // A changed remoteEpoch while our PC is already DTLS-bonded means the peer we
-  // were talking to is gone — a fresh peer cannot re-DTLS onto our old PC, so
-  // its video freezes on the last frame. Detecting the change lets us rebuild.
+  // Page-instance epoch. Minted ONCE per component mount (see init) — NOT per
+  // PeerConnection. It identifies this browser page instance so the peer can
+  // detect a genuine refresh (new mount = new epoch) apart from the stable
+  // sessionId (which survives a refresh) and apart from our own local PC
+  // rebuilds (which keep the same epoch). Per-mount is essential: minting per-PC
+  // caused a rebuild ping-pong (my rebuild → new epoch → peer rebuilds → its new
+  // epoch → I rebuild → ∞). We stamp myEpoch on every signaling message and
+  // track the peer's as remoteEpoch. A changed remoteEpoch means the peer's page
+  // reloaded and our PC is bonded to dead DTLS → recover once.
   const myEpochRef = useRef<string>("");
   const remoteEpochRef = useRef<string | null>(null);
   // Sustained-freeze recovery: frames stalled while still "connected" (Fix 2).
@@ -843,13 +846,6 @@ export const RtcCall = ({
     }
 
     // Reset signaling state
-    // Mint a fresh epoch for this PC instance so the peer can detect that our
-    // previous instance is gone (page refresh, or a local rebuild) and drop the
-    // now-dead DTLS bond on its side.
-    myEpochRef.current =
-      (typeof crypto !== "undefined" && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `${participantRole}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
     offerSentRef.current = false;
     iceCandidateBufferRef.current = [];
     needsRestartRef.current = false;
@@ -1075,26 +1071,8 @@ export const RtcCall = ({
       log(participantRole, "ICE connection state:", pc.iceConnectionState);
 
       if (pc.iceConnectionState === "failed") {
-        if (wasConnectedRef.current) {
-          // Post-connection drop: hand off to the single serialized reconnection
-          // controller (it owns ICE restart → rebuild with backoff). Avoids the
-          // old churn where this path + connection-timeout + health-check all
-          // restarted ICE at once and never let it settle.
-          startReconnectRef.current?.();
-        } else if (!iceRestartAttemptedRef.current) {
-          log(participantRole, "ICE failed — attempting ICE restart");
-          iceRestartAttemptedRef.current = true;
-          pc.restartIce();
-          // Re-send offer with ICE restart
-          if (isInitiator) {
-            offerSentRef.current = false;
-            setTimeout(() => sendOffer(), 500);
-          }
-        } else {
-          log(participantRole, "ICE restart already attempted, marking for full PC restart");
-          needsRestartRef.current = true;
-          offerSentRef.current = false;
-        }
+        // Single owner handles ICE restart → rebuild ladder (pre- and post-connection).
+        startReconnectRef.current?.("ice-failed");
       }
 
       if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
@@ -1260,7 +1238,7 @@ export const RtcCall = ({
           setIsConnected(false);
           if (wasConnectedRef.current) {
             logTelemetry("peer_disconnected", { connectionState: pc.connectionState });
-            startReconnectRef.current?.();
+            startReconnectRef.current?.("conn-failed");
           }
         } else if (wasConnectedRef.current && !peerDisconnectedTimerRef.current) {
           peerDisconnectedTimerRef.current = setTimeout(() => {
@@ -1270,7 +1248,7 @@ export const RtcCall = ({
             if (cur.connectionState !== "connected") {
               setIsConnected(false);
               logTelemetry("peer_disconnected", { connectionState: cur.connectionState });
-              startReconnectRef.current?.();
+              startReconnectRef.current?.("disconnected");
             }
           }, 5000);
         }
@@ -1404,22 +1382,14 @@ export const RtcCall = ({
         payload: { sdp: pc.localDescription, from: participantRole, epoch: myEpochRef.current },
       });
 
-      // Start connection timeout — INITIAL connect only. Once we've connected
-      // before, the serialized reconnection controller owns retries; arming this
-      // too would re-introduce the rebuild churn we just removed.
+      // Initial-connect timeout — if the first offer never reaches "connected",
+      // hand to the single recovery owner (it runs the ICE-restart → rebuild
+      // ladder). Post-connection drops are driven by the state-change handlers.
       if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
       connectionTimeoutRef.current = setTimeout(() => {
         if (wasConnectedRef.current) return;
-        if (pcRef.current?.connectionState !== "connected" && retryCountRef.current < MAX_RETRY_ATTEMPTS) {
-          retryCountRef.current++;
-          log(participantRole, `⏱️ Connection timeout — retry attempt ${retryCountRef.current}/${MAX_RETRY_ATTEMPTS}`);
-          needsRestartRef.current = true;
-          offerSentRef.current = false;
-          iceRestartAttemptedRef.current = true;
-          createPeerConnection();
-          if (isInitiator) {
-            setTimeout(() => sendOffer(), 500);
-          }
+        if (pcRef.current?.connectionState !== "connected") {
+          startReconnectRef.current?.("stuck-connecting");
         }
       }, CONNECTION_TIMEOUT_MS);
     } catch (err) {
@@ -1473,24 +1443,15 @@ export const RtcCall = ({
     if (prev === null) return;                   // first sighting — just handshake
     const pc = pcRef.current;
     if (!pc || pc.remoteDescription == null) return; // our PC is fresh — adopt, no rebuild
-    log(participantRole, `🔄 peer epoch changed (${prev} → ${epoch}) — rebuilding PC`);
+    // Peer's page reloaded: our PC is bonded to dead DTLS. Hand to the single
+    // owner as a forced rebuild. Because our epoch is per-mount (not per-PC),
+    // the rebuild does NOT change our epoch, so the peer won't counter-rebuild —
+    // no ping-pong.
+    log(participantRole, `🔄 peer epoch changed (${prev} → ${epoch}) — recover`);
     logTelemetry("peer_epoch_changed", { role: participantRole });
-    needsRestartRef.current = true;
-    offerSentRef.current = false;
     peerMediaReadyRef.current = false;
-    revertScreenShareOnReconnect();
-    createPeerConnection();
-    setPeerDisconnected(false);
-    if (isInitiator) {
-      setTimeout(() => sendOffer(), 50);
-    } else {
-      channelRef.current?.send({
-        type: "broadcast",
-        event: "join",
-        payload: { from: participantRole, epoch: myEpochRef.current },
-      });
-    }
-  }, [participantRole, isInitiator, createPeerConnection, sendOffer, revertScreenShareOnReconnect]);
+    startReconnectRef.current?.("peer-restart");
+  }, [participantRole]);
 
   // === Serialized mid-call reconnection controller ===
   // The single owner of ALL post-connection recovery (replaces the old three
@@ -1508,59 +1469,86 @@ export const RtcCall = ({
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
     if (reconnectEscalateTimerRef.current) { clearTimeout(reconnectEscalateTimerRef.current); reconnectEscalateTimerRef.current = null; }
     reconnectAttemptRef.current = 0;
+    recoveryReasonRef.current = "";
     setReconnectEscalated(false);
   };
 
+  // Force a full PC rebuild (fresh DTLS) rather than a cheap ICE restart. Needed
+  // when the peer's DTLS is definitively dead (peer refreshed) or when ICE
+  // restart didn't take (escalation after attempt 2).
+  const rebuildAndRenegotiate = () => {
+    needsRestartRef.current = true;
+    iceRestartAttemptedRef.current = true;
+    offerSentRef.current = false;
+    revertScreenShareOnReconnect();
+    createPeerConnection();
+    if (isInitiator) setTimeout(() => sendOffer(), 300);
+    else channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
+  };
+
+  // The ONE action taken per recovery tick. All health signals funnel here via
+  // startReconnect(reason) — nothing else mutates the PC for recovery. Ladder:
+  // "peer-restart" forces a rebuild immediately (dead DTLS). Otherwise the
+  // initiator tries a cheap ICE restart on attempts 1-2, then rebuilds; the
+  // answerer re-announces (mentor re-offers) and rebuilds only if its PC is dead
+  // or a rebuild is forced. Reschedules with backoff only while NOT connected —
+  // so a one-shot "frozen" ICE restart (PC stays "connected") fires exactly once.
   const runReconnectAttempt = () => {
     const pc = pcRef.current;
-    if (!pc || pc.connectionState === "connected") { stopReconnect(); return; }
+    if (!pc) { stopReconnect(); return; }
+    const reason = recoveryReasonRef.current;
     reconnectAttemptRef.current++;
     const attempt = reconnectAttemptRef.current;
-    logTelemetry("reconnect_attempt", { attempt, role: participantRole, connectionState: pc.connectionState });
+    const forceRebuild = reason === "peer-restart" || attempt > 2;
+    logTelemetry("reconnect_attempt", { attempt, reason, role: participantRole, connectionState: pc.connectionState });
 
     if (isInitiator) {
-      if (attempt <= 2 && pc.signalingState !== "closed") {
-        // Cheap path first: ICE restart on the existing PC + a fresh offer that
-        // carries the new ICE credentials. Keeps media tracks/transceivers intact.
+      if (!forceRebuild && pc.signalingState !== "closed") {
         iceRestartAttemptedRef.current = true;
         try { pc.restartIce(); } catch { /* ignore */ }
         offerSentRef.current = false;
         sendOffer();
       } else {
-        // Escalate: rebuild the PC from scratch and re-offer from clean stable.
-        needsRestartRef.current = true;
-        iceRestartAttemptedRef.current = true;
-        offerSentRef.current = false;
-        revertScreenShareOnReconnect();
-        createPeerConnection();
-        setTimeout(() => sendOffer(), 300);
+        rebuildAndRenegotiate();
       }
     } else {
-      // Answerer: re-announce so the mentor re-offers; rebuild only if PC is dead.
-      const cur = pcRef.current;
-      if (!cur || cur.signalingState === "closed") {
-        needsRestartRef.current = true;
-        revertScreenShareOnReconnect();
-        createPeerConnection();
+      if (forceRebuild || pc.signalingState === "closed") {
+        rebuildAndRenegotiate();
+      } else {
+        channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
       }
-      channelRef.current?.send({ type: "broadcast", event: "join", payload: { from: participantRole, epoch: myEpochRef.current } });
     }
 
-    const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
-    reconnectTimerRef.current = setTimeout(runReconnectAttempt, delay);
+    // Reschedule only while unconnected. peer-restart drops us to non-connected
+    // (fresh PC) so the loop continues to connect; frozen/ICE-restart keeps the
+    // PC "connected" so this stops after one shot (re-armed by the next signal).
+    if (pcRef.current && pcRef.current.connectionState !== "connected") {
+      const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
+      reconnectTimerRef.current = setTimeout(runReconnectAttempt, delay);
+    } else {
+      reconnectTimerRef.current = null;
+      reconnectAttemptRef.current = 0;
+    }
   };
 
-  const startReconnect = () => {
-    if (!wasConnectedRef.current) return;                 // only post-connection
-    if (pcRef.current?.connectionState === "connected") return;
+  // Single entry point for every recovery trigger (ICE/connection failure, stuck
+  // connecting, sustained freeze, signaling silence, peer refresh). Serialized:
+  // if a run is already in flight it's a no-op. "peer-restart" and "frozen" are
+  // allowed to start even while connectionState reads "connected" (that state is
+  // a lie in those cases); all others require a non-connected PC.
+  const startReconnect = (reason: string = "recover") => {
+    const connected = pcRef.current?.connectionState === "connected";
+    const overrideConnected = reason === "peer-restart" || reason === "frozen";
+    if (connected && !overrideConnected) return;
+    if (reconnectTimerRef.current) return;                // already running — serialize
+    recoveryReasonRef.current = reason;
     setPeerDisconnected(true);  // non-blocking "Reconnecting…" pill (not a modal)
     setIsReconnecting(true);
-    if (reconnectTimerRef.current) return;                // already running — serialize
     reconnectAttemptRef.current = 0;
     if (reconnectEscalateTimerRef.current) clearTimeout(reconnectEscalateTimerRef.current);
     setReconnectEscalated(false);
     reconnectEscalateTimerRef.current = setTimeout(() => setReconnectEscalated(true), RECONNECT_ESCALATE_MS);
-    logTelemetry("reconnect_started", { role: participantRole });
+    logTelemetry("reconnect_started", { reason, role: participantRole });
     runReconnectAttempt();
   };
 
@@ -1582,49 +1570,25 @@ export const RtcCall = ({
 
       if (!pc) return;
 
-      // Check stuck in "connecting". Deferred while the serialized reconnect
-      // controller is running (it owns post-connection retries with backoff).
+      // Stuck in "connecting" too long (initial connect or a slow renegotiation
+      // that never completes) → hand to the single recovery owner.
       if (connectingAtRef.current && pc.connectionState === "connecting") {
         const elapsed = Date.now() - connectingAtRef.current;
-        if (elapsed > CONNECTING_THRESHOLD_MS && retryCountRef.current < MAX_RETRY_ATTEMPTS && !reconnectTimerRef.current) {
-          log(participantRole, `⚠️ Stuck connecting for ${elapsed}ms, forcing restart`);
-          retryCountRef.current++;
+        if (elapsed > CONNECTING_THRESHOLD_MS) {
           connectingAtRef.current = null;
-          needsRestartRef.current = true;
-          offerSentRef.current = false;
-          iceRestartAttemptedRef.current = true;
-          revertScreenShareOnReconnect();
-          createPeerConnection();
-          if (isInitiator) {
-            setTimeout(() => sendOffer(), 500);
-          }
+          startReconnectRef.current?.("stuck-connecting");
         }
       }
 
-      // Check stuck in "disconnected". We deliberately do NOT call pc.restartIce()
-      // here: Chrome self-heals host-pair "disconnected" blips on a LAN within
-      // 1-3s, and forcing an ICE restart mid-call causes a visible freeze/blank.
-      // If ICE truly gave up, iceConnectionState becomes "failed" and
-      // oniceconnectionstatechange already handles that path. We only escalate
-      // to a full PC rebuild after a sustained failure.
+      // Sustained "disconnected". Chrome self-heals host-pair blips within 1-3s
+      // on a LAN, so we only escalate once ICE has actually "failed" — the owner
+      // then runs the ICE-restart → rebuild ladder. Clear the timer if it healed.
       if (disconnectedAtRef.current && (pc.connectionState === "disconnected" || pc.iceConnectionState === "disconnected")) {
         const elapsed = Date.now() - disconnectedAtRef.current;
-        if (elapsed > DISCONNECT_THRESHOLD_MS && pc.iceConnectionState === "failed" && !reconnectTimerRef.current) {
-          log(participantRole, `⚠️ ICE failed for ${elapsed}ms, rebuilding PC`);
+        if (elapsed > DISCONNECT_THRESHOLD_MS && pc.iceConnectionState === "failed") {
           disconnectedAtRef.current = null;
-          if (retryCountRef.current < MAX_RETRY_ATTEMPTS) {
-            retryCountRef.current++;
-            needsRestartRef.current = true;
-            offerSentRef.current = false;
-            iceRestartAttemptedRef.current = true;
-            revertScreenShareOnReconnect();
-            createPeerConnection();
-            if (isInitiator) {
-              setTimeout(() => sendOffer(), 500);
-            }
-          }
+          startReconnectRef.current?.("disconnected");
         } else if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
-          // Chrome healed itself — clear the timer.
           disconnectedAtRef.current = null;
         }
       }
@@ -1716,29 +1680,9 @@ export const RtcCall = ({
               frozenStreakRef.current++;
               if (frozenStreakRef.current >= 3) {
                 frozenStreakRef.current = 0;
-                log(participantRole, "🧊 sustained frozen frames — ICE restart");
+                log(participantRole, "🧊 sustained frozen frames — recover");
                 logTelemetry("frozen_recovery_triggered", { role: participantRole });
-                if (isInitiator) {
-                  iceRestartAttemptedRef.current = true;
-                  try { pc.restartIce(); } catch { /* ignore */ }
-                  offerSentRef.current = false;
-                  sendOffer();
-                } else {
-                  // Answerer can't force the offerer to re-offer (the mentor
-                  // ignores join while it still reads "connected"). Rebuild our
-                  // PC instead: the fresh epoch makes the mentor's onPeerEpoch
-                  // fire, so it rebuilds and re-offers to our new instance.
-                  needsRestartRef.current = true;
-                  offerSentRef.current = false;
-                  peerMediaReadyRef.current = false;
-                  revertScreenShareOnReconnect();
-                  createPeerConnection();
-                  channelRef.current?.send({
-                    type: "broadcast",
-                    event: "join",
-                    payload: { from: participantRole, epoch: myEpochRef.current },
-                  });
-                }
+                startReconnectRef.current?.("frozen");
               }
             } else {
               frozenStreakRef.current = 0;
@@ -1905,6 +1849,12 @@ export const RtcCall = ({
 
     const init = async () => {
       log(participantRole, "=== INIT START ===");
+      // Mint the page-instance epoch once for this mount (survives local PC
+      // rebuilds; changes only on a real page refresh).
+      myEpochRef.current =
+        (typeof crypto !== "undefined" && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `${participantRole}-${Math.floor(Math.random() * 1e9)}`;
       let stream: MediaStream;
       // Use browser-default video constraints. Forcing 720p@30 caused encoder to overshoot
       // throttled TURN relays, producing blur + ICE disconnects on real networks.
