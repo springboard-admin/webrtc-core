@@ -2742,6 +2742,14 @@ export const RtcCall = ({
                       : `Waiting for ${peerLabel} to join...`}
               </div>
               <p className="text-sm text-white/50">{formatTime(waitingSeconds)}</p>
+              {/* Reassure the waiting party that no action is needed — the call
+                  connects automatically the moment the peer joins. Shown only in
+                  the pure "alone" wait (not connecting / reconnecting / stalled). */}
+              {!connectionStalled && !isReconnecting && !peerPresent && (
+                <p className="text-xs text-white/40 mt-2">
+                  We’ll connect you automatically as soon as {peerLabel} joins — no need to refresh.
+                </p>
+              )}
               {/* Backstop only: the manual Reconnect appears solely when our own
                   auto-recovery has signalled likely failure with the peer present
                   (connectionStalled). It is never shown on a timer and never while

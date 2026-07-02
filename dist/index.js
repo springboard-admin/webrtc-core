@@ -3786,6 +3786,11 @@ var RtcCall = ({
         !isConnected && !peerDisconnected && /* @__PURE__ */ jsx("div", { className: "absolute inset-0 flex items-center justify-center", children: /* @__PURE__ */ jsxs("div", { className: "text-center text-white/80", children: [
           /* @__PURE__ */ jsx("div", { className: "animate-pulse text-lg mb-2", children: connectionStalled ? `Having trouble connecting to ${peerLabel}. Tap Reconnect to try again.` : isReconnecting ? `Reconnecting to ${peerLabel}\u2026` : peerPresent ? `Connecting to ${peerLabel}\u2026` : `Waiting for ${peerLabel} to join...` }),
           /* @__PURE__ */ jsx("p", { className: "text-sm text-white/50", children: formatTime(waitingSeconds) }),
+          !connectionStalled && !isReconnecting && !peerPresent && /* @__PURE__ */ jsxs("p", { className: "text-xs text-white/40 mt-2", children: [
+            "We\u2019ll connect you automatically as soon as ",
+            peerLabel,
+            " joins \u2014 no need to refresh."
+          ] }),
           connectionStalled && /* @__PURE__ */ jsx(
             "button",
             {
