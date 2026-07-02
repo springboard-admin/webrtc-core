@@ -373,6 +373,12 @@ export const RtcCall = ({
   // invoke the controller (defined later) without a definition cycle.
   const startReconnectRef = useRef<((reason?: string) => void) | null>(null);
   const recoveryReasonRef = useRef<string>("");
+  // TURN relay failover: once direct (host/srflx) connectivity has repeatedly
+  // failed (flaky/symmetric NAT, e.g. mobile), rebuild the PC forcing all media
+  // through a TURN relay. Sticky for the session — a peer whose NAT needs relay
+  // will keep needing it. Only ever SET during sustained recovery failure, so a
+  // normal first-try call never touches it.
+  const relayOnlyRef = useRef(false);
   const stopReconnectRef = useRef<(() => void) | null>(null);
 
   // Media-ready gating: mentor waits for peer's media-ready (or 10s) before sending offer.
@@ -860,7 +866,20 @@ export const RtcCall = ({
       connectionTimeoutRef.current = null;
     }
 
-    const pc = new RTCPeerConnection({ iceServers: cachedIceServers || FALLBACK_ICE_SERVERS });
+    const iceServers = cachedIceServers || FALLBACK_ICE_SERVERS;
+    // Relay-only failover: only when we've escalated there AND relay servers
+    // actually exist (else "relay" policy would yield zero candidates = no
+    // connection). Both cached (Cloudflare) and fallback configs include TURN.
+    const hasTurn = iceServers.some((s) => {
+      const u = s.urls; const arr = Array.isArray(u) ? u : [u];
+      return arr.some((x) => typeof x === "string" && x.toLowerCase().startsWith("turn"));
+    });
+    const useRelayOnly = relayOnlyRef.current && hasTurn;
+    if (useRelayOnly) log(participantRole, "🛰️ building PC relay-only (TURN failover)");
+    const pc = new RTCPeerConnection({
+      iceServers,
+      ...(useRelayOnly ? { iceTransportPolicy: "relay" as RTCIceTransportPolicy } : {}),
+    });
     // Kick off (or refresh) Cloudflare creds in background so next PC has them.
     void getIceServers(supabase);
 
@@ -1499,8 +1518,13 @@ export const RtcCall = ({
     const reason = recoveryReasonRef.current;
     reconnectAttemptRef.current++;
     const attempt = reconnectAttemptRef.current;
-    const forceRebuild = reason === "peer-restart" || attempt > 2;
-    logTelemetry("reconnect_attempt", { attempt, reason, role: participantRole, connectionState: pc.connectionState });
+    // peer-restart forces ONE rebuild (dead DTLS), then falls to the cheap
+    // ICE-restart ladder — so a flapping peer doesn't make us rebuild every
+    // backoff tick (that churn crossed offers and stalled recovery ~1min).
+    const forceRebuild = (reason === "peer-restart" && attempt === 1) || attempt > 2;
+    // Sustained direct-connect failure → flip to relay-only for the rebuild.
+    if (attempt >= 3) relayOnlyRef.current = true;
+    logTelemetry("reconnect_attempt", { attempt, reason, role: participantRole, connectionState: pc.connectionState, relayOnly: relayOnlyRef.current });
 
     if (isInitiator) {
       if (!forceRebuild && pc.signalingState !== "closed") {
@@ -1526,8 +1550,14 @@ export const RtcCall = ({
       const delay = RECONNECT_BACKOFF_MS[Math.min(attempt - 1, RECONNECT_BACKOFF_MS.length - 1)];
       reconnectTimerRef.current = setTimeout(runReconnectAttempt, delay);
     } else {
+      // Connected (e.g. a one-shot "frozen" ICE restart on a still-connected PC,
+      // where no "connected" transition fires to clear the pill). Stop cleanly
+      // and clear the reconnecting UI so it can't pin.
       reconnectTimerRef.current = null;
       reconnectAttemptRef.current = 0;
+      recoveryReasonRef.current = "";
+      setPeerDisconnected(false);
+      setIsReconnecting(false);
     }
   };
 

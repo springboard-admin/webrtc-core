@@ -1949,6 +1949,7 @@ var RtcCall = ({
   const reconnectEscalateTimerRef = useRef(null);
   const startReconnectRef = useRef(null);
   const recoveryReasonRef = useRef("");
+  const relayOnlyRef = useRef(false);
   const stopReconnectRef = useRef(null);
   const peerMediaReadyRef = useRef(false);
   const mediaReadyTimerRef = useRef(null);
@@ -2306,7 +2307,18 @@ var RtcCall = ({
       clearTimeout(connectionTimeoutRef.current);
       connectionTimeoutRef.current = null;
     }
-    const pc = new RTCPeerConnection({ iceServers: cachedIceServers || FALLBACK_ICE_SERVERS });
+    const iceServers = cachedIceServers || FALLBACK_ICE_SERVERS;
+    const hasTurn = iceServers.some((s) => {
+      const u = s.urls;
+      const arr = Array.isArray(u) ? u : [u];
+      return arr.some((x) => typeof x === "string" && x.toLowerCase().startsWith("turn"));
+    });
+    const useRelayOnly = relayOnlyRef.current && hasTurn;
+    if (useRelayOnly) log(participantRole, "\u{1F6F0}\uFE0F building PC relay-only (TURN failover)");
+    const pc = new RTCPeerConnection({
+      iceServers,
+      ...useRelayOnly ? { iceTransportPolicy: "relay" } : {}
+    });
     void getIceServers(supabase);
     try {
       diagnosticsRef.current?.destroy();
@@ -2805,8 +2817,9 @@ var RtcCall = ({
     const reason = recoveryReasonRef.current;
     reconnectAttemptRef.current++;
     const attempt = reconnectAttemptRef.current;
-    const forceRebuild = reason === "peer-restart" || attempt > 2;
-    logTelemetry("reconnect_attempt", { attempt, reason, role: participantRole, connectionState: pc.connectionState });
+    const forceRebuild = reason === "peer-restart" && attempt === 1 || attempt > 2;
+    if (attempt >= 3) relayOnlyRef.current = true;
+    logTelemetry("reconnect_attempt", { attempt, reason, role: participantRole, connectionState: pc.connectionState, relayOnly: relayOnlyRef.current });
     if (isInitiator) {
       if (!forceRebuild && pc.signalingState !== "closed") {
         iceRestartAttemptedRef.current = true;
@@ -2832,6 +2845,9 @@ var RtcCall = ({
     } else {
       reconnectTimerRef.current = null;
       reconnectAttemptRef.current = 0;
+      recoveryReasonRef.current = "";
+      setPeerDisconnected(false);
+      setIsReconnecting(false);
     }
   };
   const startReconnect = (reason = "recover") => {
