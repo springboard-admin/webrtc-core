@@ -1540,10 +1540,19 @@ export const RtcCall = ({
     const connected = pcRef.current?.connectionState === "connected";
     const overrideConnected = reason === "peer-restart" || reason === "frozen";
     if (connected && !overrideConnected) return;
+    // Gate: only run recovery when a peer is (or was) actually there. Alone in
+    // the room = stay on "Waiting for …", no PC-rebuild churn. Peer presence is
+    // the student's ~1s join ping (lastPeerJoinAtRef); wasConnected covers a drop.
+    const peerHere = wasConnectedRef.current || (Date.now() - lastPeerJoinAtRef.current < 6000);
+    if (!peerHere) return;
     if (reconnectTimerRef.current) return;                // already running — serialize
     recoveryReasonRef.current = reason;
-    setPeerDisconnected(true);  // non-blocking "Reconnecting…" pill (not a modal)
-    setIsReconnecting(true);
+    // "Reconnecting…" pill only after a real prior connection. Before the first
+    // connect, the peer-present path shows "Connecting to …" — never "Reconnecting".
+    if (wasConnectedRef.current) {
+      setPeerDisconnected(true);
+      setIsReconnecting(true);
+    }
     reconnectAttemptRef.current = 0;
     if (reconnectEscalateTimerRef.current) clearTimeout(reconnectEscalateTimerRef.current);
     setReconnectEscalated(false);

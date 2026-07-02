@@ -2838,10 +2838,14 @@ var RtcCall = ({
     const connected = pcRef.current?.connectionState === "connected";
     const overrideConnected = reason === "peer-restart" || reason === "frozen";
     if (connected && !overrideConnected) return;
+    const peerHere = wasConnectedRef.current || Date.now() - lastPeerJoinAtRef.current < 6e3;
+    if (!peerHere) return;
     if (reconnectTimerRef.current) return;
     recoveryReasonRef.current = reason;
-    setPeerDisconnected(true);
-    setIsReconnecting(true);
+    if (wasConnectedRef.current) {
+      setPeerDisconnected(true);
+      setIsReconnecting(true);
+    }
     reconnectAttemptRef.current = 0;
     if (reconnectEscalateTimerRef.current) clearTimeout(reconnectEscalateTimerRef.current);
     setReconnectEscalated(false);
