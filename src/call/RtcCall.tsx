@@ -169,6 +169,8 @@ export const RtcCall = ({
   peerRole,
   signalingRole,
   selfName,
+  peerName,
+  appVersion,
   features,
   slots,
   buildBridgeUrl,
@@ -890,6 +892,7 @@ export const RtcCall = ({
         supabase,
         restUrl: (supabase as any).supabaseUrl ?? "",
         restKey: (supabase as any).supabaseKey ?? "",
+        appVersion,
       });
       if (sessionIdRef.current) diagnosticsRef.current.setCallId(sessionIdRef.current);
     } catch {
@@ -2722,6 +2725,11 @@ export const RtcCall = ({
   }, []);
 
   const peerLabel = peerRole;
+  // Personalized peer name for status copy (e.g. "Lakeena has joined…"); falls
+  // back to a capitalized role when the consumer doesn't pass peerName.
+  const peerDisplayName = (peerName && peerName.trim())
+    ? peerName.trim()
+    : peerLabel.charAt(0).toUpperCase() + peerLabel.slice(1);
 
   return (
     <div ref={containerRef} data-in-call="true" className="fixed inset-0 z-50 bg-foreground/95 overflow-hidden flex flex-col">
@@ -2764,12 +2772,12 @@ export const RtcCall = ({
             <div className="text-center text-white/80">
               <div className="animate-pulse text-lg mb-2">
                 {connectionStalled
-                  ? `Having trouble connecting to ${peerLabel}. Tap Reconnect to try again.`
+                  ? `Having trouble connecting to ${peerDisplayName}. Tap Reconnect to try again.`
                   : isReconnecting
-                    ? `Reconnecting to ${peerLabel}…`
+                    ? `Reconnecting to ${peerDisplayName}…`
                     : peerPresent
-                      ? `Connecting to ${peerLabel}…`
-                      : `Waiting for ${peerLabel} to join...`}
+                      ? `${peerDisplayName} has joined — setting up your connection`
+                      : `Waiting for ${peerDisplayName} to join...`}
               </div>
               <p className="text-sm text-white/50">{formatTime(waitingSeconds)}</p>
               {/* Reassure the waiting party that no action is needed — the call
@@ -2777,7 +2785,7 @@ export const RtcCall = ({
                   the pure "alone" wait (not connecting / reconnecting / stalled). */}
               {!connectionStalled && !isReconnecting && !peerPresent && (
                 <p className="text-xs text-white/40 mt-2">
-                  We’ll connect you automatically as soon as {peerLabel} joins — no need to refresh.
+                  We’ll connect you automatically as soon as {peerDisplayName} joins — no need to refresh.
                 </p>
               )}
               {/* Backstop only: the manual Reconnect appears solely when our own
@@ -2793,12 +2801,6 @@ export const RtcCall = ({
                 >
                   {isReconnecting ? "Reconnecting…" : "Reconnect"}
                 </button>
-              )}
-              {peerOnPage && (
-                <div className="mt-3 inline-flex items-center gap-2 rounded-full bg-green-500/20 px-3 py-1 text-sm text-green-300">
-                  <span className="h-2 w-2 rounded-full bg-green-400 animate-ping" />
-                  Your {peerLabel} is on their page — they haven't joined yet
-                </div>
               )}
             </div>
           </div>

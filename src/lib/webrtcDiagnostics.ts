@@ -30,6 +30,8 @@ export interface DiagnosticsConfig {
   /** REST base URL + anon key, used only for the keepalive beacon on pagehide. */
   restUrl: string;
   restKey: string;
+  /** Consuming app's bundle version — stamped into the diagnostics environment. */
+  appVersion?: string;
 }
 
 const isValidUUID = (s: string | null | undefined): boolean =>
@@ -243,6 +245,8 @@ export class WebRTCDiagnostics {
       env.onLine = navigator.onLine;
       env.host = window.location.hostname;
       env.browser_fingerprint = this.getBrowserFingerprint();
+      // Pin every diagnostic to the exact consumer bundle that produced it.
+      if (this.cfg.appVersion) env.app_version = this.cfg.appVersion;
     });
     return env;
   }

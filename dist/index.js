@@ -747,6 +747,7 @@ var WebRTCDiagnostics = class {
       env.onLine = navigator.onLine;
       env.host = window.location.hostname;
       env.browser_fingerprint = this.getBrowserFingerprint();
+      if (this.cfg.appVersion) env.app_version = this.cfg.appVersion;
     });
     return env;
   }
@@ -1784,6 +1785,8 @@ var RtcCall = ({
   peerRole,
   signalingRole,
   selfName,
+  peerName,
+  appVersion,
   features,
   slots,
   buildBridgeUrl,
@@ -2325,7 +2328,8 @@ var RtcCall = ({
       diagnosticsRef.current = new WebRTCDiagnostics(pc, participantId, participantRole, {
         supabase,
         restUrl: supabase.supabaseUrl ?? "",
-        restKey: supabase.supabaseKey ?? ""
+        restKey: supabase.supabaseKey ?? "",
+        appVersion
       });
       if (sessionIdRef.current) diagnosticsRef.current.setCallId(sessionIdRef.current);
     } catch {
@@ -3779,6 +3783,7 @@ var RtcCall = ({
     void sendWb({ kind: "pointer", ...p });
   }, []);
   const peerLabel = peerRole;
+  const peerDisplayName = peerName && peerName.trim() ? peerName.trim() : peerLabel.charAt(0).toUpperCase() + peerLabel.slice(1);
   return /* @__PURE__ */ jsxs("div", { ref: containerRef, "data-in-call": "true", className: "fixed inset-0 z-50 bg-foreground/95 overflow-hidden flex flex-col", children: [
     /* @__PURE__ */ jsxs("div", { className: "flex-1 min-h-0 flex", children: [
       /* @__PURE__ */ jsxs("div", { className: `relative bg-black ${studentDetailsOpen ? "flex-1 min-w-0" : "flex-1"}`, children: [
@@ -3800,11 +3805,11 @@ var RtcCall = ({
           ] })
         ] }) }),
         !isConnected && !peerDisconnected && /* @__PURE__ */ jsx("div", { className: "absolute inset-0 flex items-center justify-center", children: /* @__PURE__ */ jsxs("div", { className: "text-center text-white/80", children: [
-          /* @__PURE__ */ jsx("div", { className: "animate-pulse text-lg mb-2", children: connectionStalled ? `Having trouble connecting to ${peerLabel}. Tap Reconnect to try again.` : isReconnecting ? `Reconnecting to ${peerLabel}\u2026` : peerPresent ? `Connecting to ${peerLabel}\u2026` : `Waiting for ${peerLabel} to join...` }),
+          /* @__PURE__ */ jsx("div", { className: "animate-pulse text-lg mb-2", children: connectionStalled ? `Having trouble connecting to ${peerDisplayName}. Tap Reconnect to try again.` : isReconnecting ? `Reconnecting to ${peerDisplayName}\u2026` : peerPresent ? `${peerDisplayName} has joined \u2014 setting up your connection` : `Waiting for ${peerDisplayName} to join...` }),
           /* @__PURE__ */ jsx("p", { className: "text-sm text-white/50", children: formatTime(waitingSeconds) }),
           !connectionStalled && !isReconnecting && !peerPresent && /* @__PURE__ */ jsxs("p", { className: "text-xs text-white/40 mt-2", children: [
             "We\u2019ll connect you automatically as soon as ",
-            peerLabel,
+            peerDisplayName,
             " joins \u2014 no need to refresh."
           ] }),
           connectionStalled && /* @__PURE__ */ jsx(
@@ -3816,13 +3821,7 @@ var RtcCall = ({
               className: "mt-3 rounded-md border border-white/30 bg-white/10 px-4 py-1.5 text-sm font-medium text-white hover:bg-white/20 disabled:opacity-60",
               children: isReconnecting ? "Reconnecting\u2026" : "Reconnect"
             }
-          ),
-          peerOnPage && /* @__PURE__ */ jsxs("div", { className: "mt-3 inline-flex items-center gap-2 rounded-full bg-green-500/20 px-3 py-1 text-sm text-green-300", children: [
-            /* @__PURE__ */ jsx("span", { className: "h-2 w-2 rounded-full bg-green-400 animate-ping" }),
-            "Your ",
-            peerLabel,
-            " is on their page \u2014 they haven't joined yet"
-          ] })
+          )
         ] }) }),
         !whiteboardOpen && /* @__PURE__ */ jsx(DraggablePiP, { sizeClassName: "w-24 sm:w-36 aspect-video", children: /* @__PURE__ */ jsx(
           "video",

@@ -68,6 +68,13 @@ interface RtcCallProps {
     signalingRole: "initiator" | "responder";
     /** Display name for this user, used in the "X is trying to join" chat ping. */
     selfName?: string;
+    /** Optional display name for the peer (e.g. student first name). Used in the
+     * waiting/connecting copy; falls back to a capitalized `peerRole` if omitted. */
+    peerName?: string;
+    /** Build version of the consuming app's bundle. Stamped into webrtc_diagnostics
+     * so every row is pinned to the exact bundle per participant ("stale client"
+     * becomes a query, not forensics). */
+    appVersion?: string;
     features?: CallFeatures;
     slots?: CallRenderSlots;
     /**
@@ -88,7 +95,7 @@ interface RtcCallProps {
     }) => void;
 }
 
-declare const RtcCall: ({ supabase, roomId, self, peerRole, signalingRole, selfName, features, slots, buildBridgeUrl, onLifecycle, onTelemetry, onCallEnd, }: RtcCallProps) => react.JSX.Element;
+declare const RtcCall: ({ supabase, roomId, self, peerRole, signalingRole, selfName, peerName, appVersion, features, slots, buildBridgeUrl, onLifecycle, onTelemetry, onCallEnd, }: RtcCallProps) => react.JSX.Element;
 
 declare const makeSystemMessage: (text: string) => string;
 interface ChatMessage {
