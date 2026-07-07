@@ -1173,6 +1173,10 @@ export const RtcCall = ({
         setConnectionStalled(false);
         wasConnectedRef.current = true;
         bothConnectedAtRef.current = new Date();
+        // First time the call is two-way connected. Consumers persisting their
+        // own session records (e.g. talk-time) key off this.
+        emitLifecycle({ type: "peerConnected", at: Date.now() });
+        emitLifecycle({ type: "connected", at: Date.now() });
         // Stamp connected_at once (first time the call is two-way connected) so
         // the generic participant row carries a real talk-time start. Talk/overlap
         // duration is then derivable per call as min(left_at) - max(connected_at),
@@ -1591,6 +1595,7 @@ export const RtcCall = ({
     if (wasConnectedRef.current) {
       setPeerDisconnected(true);
       setIsReconnecting(true);
+      emitLifecycle({ type: "reconnecting", at: Date.now() });
     }
     reconnectAttemptRef.current = 0;
     if (reconnectEscalateTimerRef.current) clearTimeout(reconnectEscalateTimerRef.current);

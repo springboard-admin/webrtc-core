@@ -2548,6 +2548,8 @@ var RtcCall = ({
         setConnectionStalled(false);
         wasConnectedRef.current = true;
         bothConnectedAtRef.current = /* @__PURE__ */ new Date();
+        emitLifecycle({ type: "peerConnected", at: Date.now() });
+        emitLifecycle({ type: "connected", at: Date.now() });
         if (!connectedAtWrittenRef.current && sessionIdRef.current) {
           connectedAtWrittenRef.current = true;
           void supabase.from("call_participants").update({ connected_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("call_id", sessionIdRef.current).eq("participant_id", participantId);
@@ -2866,6 +2868,7 @@ var RtcCall = ({
     if (wasConnectedRef.current) {
       setPeerDisconnected(true);
       setIsReconnecting(true);
+      emitLifecycle({ type: "reconnecting", at: Date.now() });
     }
     reconnectAttemptRef.current = 0;
     if (reconnectEscalateTimerRef.current) clearTimeout(reconnectEscalateTimerRef.current);
