@@ -53,6 +53,24 @@ interface CallRenderSlots {
     peerInfo?: ReactNode;
     /** Rendered in the overflow menu (e.g. "share to device"). */
     overflowMenu?: ReactNode;
+    /**
+     * App-owned side panel rendered in the same right-hand container as the
+     * built-in chat panel (e.g. an app chat that also lives outside the call).
+     * The render prop receives `close` so the panel can dismiss itself. Opening
+     * it closes the built-in chat panel and vice versa.
+     */
+    sidePanel?: (ctx: {
+        close: () => void;
+    }) => ReactNode;
+    /**
+     * Toolbar toggle for `sidePanel`; the button is hidden unless both are set.
+     * `showBadge` renders the same unread dot the built-in chat button uses.
+     */
+    sidePanelButton?: {
+        icon: ReactNode;
+        title?: string;
+        showBadge?: boolean;
+    };
 }
 /** The public props for the core call component. */
 interface RtcCallProps {

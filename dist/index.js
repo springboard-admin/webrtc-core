@@ -1798,10 +1798,10 @@ var RtcCall = ({
   const participantId = self.id;
   const participantRole = self.role;
   const isInitiator = signalingRole === "initiator";
-  features?.whiteboard !== false;
-  features?.screenShare !== false;
-  features?.chat !== false;
-  features?.bridge !== false;
+  const featureWhiteboard = features?.whiteboard !== false;
+  const featureScreenShare = features?.screenShare !== false;
+  const featureChat = features?.chat !== false;
+  const featureBridge = features?.bridge !== false;
   const emitLifecycle = useCallback((e) => {
     try {
       onLifecycle?.(e);
@@ -1871,7 +1871,8 @@ var RtcCall = ({
   const [selectedSpeaker, setSelectedSpeaker] = useState("");
   const [chatOpen, setChatOpen] = useState(false);
   const dataChannelRef = useRef(null);
-  const pairChat = usePairChat(supabase, pairId, participantRole, participantId);
+  const pairChat = usePairChat(supabase, featureChat ? pairId : "", participantRole, participantId);
+  const [sidePanelOpen, setSidePanelOpen] = useState(false);
   const [whiteboardOpen, setWhiteboardOpen] = useState(false);
   const wbDataChannelRef = useRef(null);
   const wbHandleRef = useRef(null);
@@ -3865,7 +3866,7 @@ var RtcCall = ({
             /* @__PURE__ */ jsx("button", { onClick: () => setWeakNetworkDismissed(true), className: "ml-1 hover:opacity-80", children: /* @__PURE__ */ jsx(X, { className: "h-3.5 w-3.5" }) })
           ] });
         })(),
-        chatOpen && /* @__PURE__ */ jsxs("div", { className: "absolute top-0 right-0 bottom-0 w-full sm:w-72 bg-card/95 backdrop-blur border-l flex flex-col z-40 px-3 pb-2", children: [
+        featureChat && chatOpen && /* @__PURE__ */ jsxs("div", { className: "absolute top-0 right-0 bottom-0 w-full sm:w-72 bg-card/95 backdrop-blur border-l flex flex-col z-40 px-3 pb-2", children: [
           /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between py-2 border-b", children: [
             /* @__PURE__ */ jsx("span", { className: "text-sm font-semibold text-card-foreground", children: "Chat" }),
             /* @__PURE__ */ jsx("button", { onClick: () => {
@@ -3883,7 +3884,8 @@ var RtcCall = ({
               compact: true
             }
           )
-        ] })
+        ] }),
+        sidePanelOpen && slots?.sidePanel && /* @__PURE__ */ jsx("div", { className: "absolute top-0 right-0 bottom-0 w-full sm:w-72 bg-card/95 backdrop-blur border-l flex flex-col z-40 px-3 pb-2", children: slots.sidePanel({ close: () => setSidePanelOpen(false) }) })
       ] }),
       studentDetailsOpen && slots?.peerInfo && !isMobile && /* @__PURE__ */ jsxs("div", { className: "w-[380px] shrink-0 bg-white overflow-y-auto flex flex-col", children: [
         /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between px-4 py-3 border-b border-gray-200", children: [
@@ -3905,7 +3907,7 @@ var RtcCall = ({
     !isMobile && /* @__PURE__ */ jsxs("div", { className: "flex flex-wrap items-center justify-center gap-2 sm:gap-3 p-2 sm:p-3 bg-black/80", children: [
       /* @__PURE__ */ jsx(Button, { variant: "ghost", size: "icon", className: `rounded-full ${isMuted ? "bg-destructive text-white" : "text-white hover:bg-white/20"}`, onClick: toggleMute, children: isMuted ? /* @__PURE__ */ jsx(MicOff, { className: "h-5 w-5" }) : /* @__PURE__ */ jsx(Mic, { className: "h-5 w-5" }) }),
       !audioOnly && /* @__PURE__ */ jsx(Button, { variant: "ghost", size: "icon", className: `rounded-full ${isCameraOff ? "bg-destructive text-white" : "text-white hover:bg-white/20"}`, onClick: toggleCamera, children: isCameraOff ? /* @__PURE__ */ jsx(VideoOff, { className: "h-5 w-5" }) : /* @__PURE__ */ jsx(Video, { className: "h-5 w-5" }) }),
-      /* @__PURE__ */ jsx(
+      featureScreenShare && /* @__PURE__ */ jsx(
         Button,
         {
           variant: "ghost",
@@ -3916,7 +3918,7 @@ var RtcCall = ({
           children: isScreenSharing ? /* @__PURE__ */ jsx(MonitorOff, { className: "h-5 w-5" }) : /* @__PURE__ */ jsx(Monitor, { className: "h-5 w-5" })
         }
       ),
-      /* @__PURE__ */ jsx(
+      featureWhiteboard && /* @__PURE__ */ jsx(
         Button,
         {
           variant: "ghost",
@@ -3928,7 +3930,7 @@ var RtcCall = ({
         }
       ),
       /* @__PURE__ */ jsx(Button, { variant: "destructive", size: "icon", className: "rounded-full", onClick: () => handleEndCall(), children: /* @__PURE__ */ jsx(PhoneOff, { className: "h-5 w-5" }) }),
-      /* @__PURE__ */ jsxs("div", { className: "relative", children: [
+      featureChat && /* @__PURE__ */ jsxs("div", { className: "relative", children: [
         /* @__PURE__ */ jsx(
           Button,
           {
@@ -3938,6 +3940,7 @@ var RtcCall = ({
             onClick: () => {
               const next = !chatOpen;
               setChatOpen(next);
+              if (next) setSidePanelOpen(false);
               pairChat.setActive(next);
             },
             title: "Chat",
@@ -3945,6 +3948,27 @@ var RtcCall = ({
           }
         ),
         pairChat.unread && !chatOpen && /* @__PURE__ */ jsx("span", { className: "absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" })
+      ] }),
+      slots?.sidePanel && slots?.sidePanelButton && /* @__PURE__ */ jsxs("div", { className: "relative", children: [
+        /* @__PURE__ */ jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            className: `rounded-full ${sidePanelOpen ? "bg-primary text-primary-foreground" : "text-white hover:bg-white/20"}`,
+            onClick: () => {
+              const next = !sidePanelOpen;
+              setSidePanelOpen(next);
+              if (next) {
+                setChatOpen(false);
+                pairChat.setActive(false);
+              }
+            },
+            title: slots.sidePanelButton.title,
+            children: slots.sidePanelButton.icon
+          }
+        ),
+        slots.sidePanelButton.showBadge && !sidePanelOpen && /* @__PURE__ */ jsx("span", { className: "absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" })
       ] }),
       /* @__PURE__ */ jsxs(Popover, { open: showDevicePicker, onOpenChange: setShowDevicePicker, children: [
         /* @__PURE__ */ jsx(PopoverTrigger, { asChild: true, children: /* @__PURE__ */ jsx(Button, { variant: "ghost", size: "icon", className: "rounded-full text-white hover:bg-white/20", title: "Audio & Video Settings", children: /* @__PURE__ */ jsx(Settings, { className: "h-5 w-5" }) }) }),
@@ -3981,7 +4005,7 @@ var RtcCall = ({
               ]
             }
           ) }),
-          whiteboardOpen && /* @__PURE__ */ jsx("div", { className: `pt-2 ${slots?.peerInfo ? "" : "border-t border-border"}`, children: /* @__PURE__ */ jsxs(
+          featureBridge && whiteboardOpen && /* @__PURE__ */ jsx("div", { className: `pt-2 ${slots?.peerInfo ? "" : "border-t border-border"}`, children: /* @__PURE__ */ jsxs(
             Button,
             {
               variant: "ghost",
@@ -4009,7 +4033,7 @@ var RtcCall = ({
     isMobile && /* @__PURE__ */ jsxs("div", { className: "flex flex-wrap items-center justify-center gap-2 sm:gap-3 p-2 sm:p-3 bg-black/80", children: [
       /* @__PURE__ */ jsx(Button, { variant: "ghost", size: "icon", className: `rounded-full ${isMuted ? "bg-destructive text-white" : "text-white hover:bg-white/20"}`, onClick: toggleMute, children: isMuted ? /* @__PURE__ */ jsx(MicOff, { className: "h-5 w-5" }) : /* @__PURE__ */ jsx(Mic, { className: "h-5 w-5" }) }),
       !audioOnly && /* @__PURE__ */ jsx(Button, { variant: "ghost", size: "icon", className: `rounded-full ${isCameraOff ? "bg-destructive text-white" : "text-white hover:bg-white/20"}`, onClick: toggleCamera, children: isCameraOff ? /* @__PURE__ */ jsx(VideoOff, { className: "h-5 w-5" }) : /* @__PURE__ */ jsx(Video, { className: "h-5 w-5" }) }),
-      /* @__PURE__ */ jsxs("div", { className: "relative", children: [
+      featureChat && /* @__PURE__ */ jsxs("div", { className: "relative", children: [
         /* @__PURE__ */ jsx(
           Button,
           {
@@ -4019,6 +4043,7 @@ var RtcCall = ({
             onClick: () => {
               const next = !chatOpen;
               setChatOpen(next);
+              if (next) setSidePanelOpen(false);
               pairChat.setActive(next);
             },
             title: "Chat",
@@ -4027,11 +4052,32 @@ var RtcCall = ({
         ),
         pairChat.unread && !chatOpen && /* @__PURE__ */ jsx("span", { className: "absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" })
       ] }),
+      slots?.sidePanel && slots?.sidePanelButton && /* @__PURE__ */ jsxs("div", { className: "relative", children: [
+        /* @__PURE__ */ jsx(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            className: `rounded-full ${sidePanelOpen ? "bg-primary text-primary-foreground" : "text-white hover:bg-white/20"}`,
+            onClick: () => {
+              const next = !sidePanelOpen;
+              setSidePanelOpen(next);
+              if (next) {
+                setChatOpen(false);
+                pairChat.setActive(false);
+              }
+            },
+            title: slots.sidePanelButton.title,
+            children: slots.sidePanelButton.icon
+          }
+        ),
+        slots.sidePanelButton.showBadge && !sidePanelOpen && /* @__PURE__ */ jsx("span", { className: "absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" })
+      ] }),
       /* @__PURE__ */ jsx(Button, { variant: "destructive", size: "icon", className: "rounded-full", onClick: () => handleEndCall(), children: /* @__PURE__ */ jsx(PhoneOff, { className: "h-5 w-5" }) }),
       /* @__PURE__ */ jsxs(Popover, { open: showDevicePicker, onOpenChange: setShowDevicePicker, children: [
         /* @__PURE__ */ jsx(PopoverTrigger, { asChild: true, children: /* @__PURE__ */ jsx(Button, { variant: "ghost", size: "icon", className: "rounded-full text-white hover:bg-white/20", title: "More options", children: /* @__PURE__ */ jsx(MoreVertical, { className: "h-5 w-5" }) }) }),
         /* @__PURE__ */ jsx(PopoverContent, { className: "w-64 p-2", side: "top", align: "center", children: /* @__PURE__ */ jsxs("div", { className: "space-y-1", children: [
-          /* @__PURE__ */ jsxs(
+          featureScreenShare && /* @__PURE__ */ jsxs(
             Button,
             {
               variant: "ghost",
@@ -4047,7 +4093,7 @@ var RtcCall = ({
               ]
             }
           ),
-          /* @__PURE__ */ jsxs(
+          featureWhiteboard && /* @__PURE__ */ jsxs(
             Button,
             {
               variant: "ghost",
@@ -4079,7 +4125,7 @@ var RtcCall = ({
               ]
             }
           ),
-          whiteboardOpen && /* @__PURE__ */ jsxs(
+          featureBridge && whiteboardOpen && /* @__PURE__ */ jsxs(
             Button,
             {
               variant: "ghost",

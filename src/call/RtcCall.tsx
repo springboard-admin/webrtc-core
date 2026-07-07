@@ -261,7 +261,13 @@ export const RtcCall = ({
   // SDP stability but no longer used for messages.
   const [chatOpen, setChatOpen] = useState(false);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
-  const pairChat = usePairChat(supabase, pairId, participantRole, participantId);
+  // Empty roomId fully disables the hook (no chat_messages reads/subscription)
+  // so apps without the chat tables can turn the feature off.
+  const pairChat = usePairChat(supabase, featureChat ? pairId : "", participantRole, participantId);
+
+  // App-owned side panel (slots.sidePanel) — shares the chat panel's container;
+  // only one of the two is open at a time.
+  const [sidePanelOpen, setSidePanelOpen] = useState(false);
 
   // Whiteboard state
   const [whiteboardOpen, setWhiteboardOpen] = useState(false);
@@ -2868,7 +2874,7 @@ export const RtcCall = ({
 
         {/* Chat panel — full width on mobile, fixed side panel on larger screens.
             Same chat + transport as the dashboard (48h persisted, via Supabase). */}
-        {chatOpen && (
+        {featureChat && chatOpen && (
           <div className="absolute top-0 right-0 bottom-0 w-full sm:w-72 bg-card/95 backdrop-blur border-l flex flex-col z-40 px-3 pb-2">
             <div className="flex items-center justify-between py-2 border-b">
               <span className="text-sm font-semibold text-card-foreground">Chat</span>
@@ -2883,6 +2889,14 @@ export const RtcCall = ({
               onSend={pairChat.send}
               compact
             />
+          </div>
+        )}
+
+        {/* App-owned side panel (slots.sidePanel) — same container/geometry as
+            the chat panel above; the app renders its own header/close. */}
+        {sidePanelOpen && slots?.sidePanel && (
+          <div className="absolute top-0 right-0 bottom-0 w-full sm:w-72 bg-card/95 backdrop-blur border-l flex flex-col z-40 px-3 pb-2">
+            {slots.sidePanel({ close: () => setSidePanelOpen(false) })}
           </div>
         )}
       </div>
@@ -2921,6 +2935,7 @@ export const RtcCall = ({
             {isCameraOff ? <VideoOff className="h-5 w-5" /> : <Video className="h-5 w-5" />}
           </Button>
         )}
+        {featureScreenShare && (
         <Button
           variant="ghost"
           size="icon"
@@ -2930,6 +2945,8 @@ export const RtcCall = ({
         >
           {isScreenSharing ? <MonitorOff className="h-5 w-5" /> : <Monitor className="h-5 w-5" />}
         </Button>
+        )}
+        {featureWhiteboard && (
         <Button
           variant="ghost"
           size="icon"
@@ -2939,16 +2956,18 @@ export const RtcCall = ({
         >
           <SquarePen className="h-5 w-5" />
         </Button>
+        )}
         <Button variant="destructive" size="icon" className="rounded-full" onClick={() => handleEndCall()}>
           <PhoneOff className="h-5 w-5" />
         </Button>
         {/* Chat button with unread dot */}
+        {featureChat && (
         <div className="relative">
           <Button
             variant="ghost"
             size="icon"
             className={`rounded-full ${chatOpen ? "bg-primary text-primary-foreground" : "text-white hover:bg-white/20"}`}
-            onClick={() => { const next = !chatOpen; setChatOpen(next); pairChat.setActive(next); }}
+            onClick={() => { const next = !chatOpen; setChatOpen(next); if (next) setSidePanelOpen(false); pairChat.setActive(next); }}
             title="Chat"
           >
             <MessageSquare className="h-5 w-5" />
@@ -2957,6 +2976,24 @@ export const RtcCall = ({
             <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" />
           )}
         </div>
+        )}
+        {/* App side-panel toggle (slots.sidePanelButton) */}
+        {slots?.sidePanel && slots?.sidePanelButton && (
+        <div className="relative">
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`rounded-full ${sidePanelOpen ? "bg-primary text-primary-foreground" : "text-white hover:bg-white/20"}`}
+            onClick={() => { const next = !sidePanelOpen; setSidePanelOpen(next); if (next) { setChatOpen(false); pairChat.setActive(false); } }}
+            title={slots.sidePanelButton.title}
+          >
+            {slots.sidePanelButton.icon}
+          </Button>
+          {slots.sidePanelButton.showBadge && !sidePanelOpen && (
+            <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" />
+          )}
+        </div>
+        )}
         <Popover open={showDevicePicker} onOpenChange={setShowDevicePicker}>
           <PopoverTrigger asChild>
             <Button variant="ghost" size="icon" className="rounded-full text-white hover:bg-white/20" title="Audio & Video Settings">
@@ -3019,7 +3056,7 @@ export const RtcCall = ({
                   </Button>
                 </div>
               )}
-              {whiteboardOpen && (
+              {featureBridge && whiteboardOpen && (
                 <div className={`pt-2 ${slots?.peerInfo ? "" : "border-t border-border"}`}>
                   <Button
                     variant="ghost"
@@ -3061,12 +3098,13 @@ export const RtcCall = ({
             {isCameraOff ? <VideoOff className="h-5 w-5" /> : <Video className="h-5 w-5" />}
           </Button>
         )}
+        {featureChat && (
         <div className="relative">
           <Button
             variant="ghost"
             size="icon"
             className={`rounded-full ${chatOpen ? "bg-primary text-primary-foreground" : "text-white hover:bg-white/20"}`}
-            onClick={() => { const next = !chatOpen; setChatOpen(next); pairChat.setActive(next); }}
+            onClick={() => { const next = !chatOpen; setChatOpen(next); if (next) setSidePanelOpen(false); pairChat.setActive(next); }}
             title="Chat"
           >
             <MessageSquare className="h-5 w-5" />
@@ -3075,6 +3113,23 @@ export const RtcCall = ({
             <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" />
           )}
         </div>
+        )}
+        {slots?.sidePanel && slots?.sidePanelButton && (
+        <div className="relative">
+          <Button
+            variant="ghost"
+            size="icon"
+            className={`rounded-full ${sidePanelOpen ? "bg-primary text-primary-foreground" : "text-white hover:bg-white/20"}`}
+            onClick={() => { const next = !sidePanelOpen; setSidePanelOpen(next); if (next) { setChatOpen(false); pairChat.setActive(false); } }}
+            title={slots.sidePanelButton.title}
+          >
+            {slots.sidePanelButton.icon}
+          </Button>
+          {slots.sidePanelButton.showBadge && !sidePanelOpen && (
+            <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-destructive ring-2 ring-background" />
+          )}
+        </div>
+        )}
         <Button variant="destructive" size="icon" className="rounded-full" onClick={() => handleEndCall()}>
           <PhoneOff className="h-5 w-5" />
         </Button>
@@ -3087,6 +3142,7 @@ export const RtcCall = ({
           </PopoverTrigger>
           <PopoverContent className="w-64 p-2" side="top" align="center">
             <div className="space-y-1">
+              {featureScreenShare && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -3096,6 +3152,8 @@ export const RtcCall = ({
                 {isScreenSharing ? <MonitorOff className="h-4 w-4 mr-2" /> : <Monitor className="h-4 w-4 mr-2" />}
                 {isScreenSharing ? "Stop sharing" : "Share screen"}
               </Button>
+              )}
+              {featureWhiteboard && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -3105,6 +3163,7 @@ export const RtcCall = ({
                 <SquarePen className="h-4 w-4 mr-2" />
                 {whiteboardOpen ? "Close Whiteboard" : "Whiteboard"}
               </Button>
+              )}
               <Button
                 variant="ghost"
                 size="sm"
@@ -3114,7 +3173,7 @@ export const RtcCall = ({
                 {isFullscreen ? <Minimize2 className="h-4 w-4 mr-2" /> : <Maximize2 className="h-4 w-4 mr-2" />}
                 {isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               </Button>
-              {whiteboardOpen && (
+              {featureBridge && whiteboardOpen && (
                 <Button
                   variant="ghost"
                   size="sm"
