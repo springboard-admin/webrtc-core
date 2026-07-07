@@ -49,8 +49,12 @@ interface CallFeatures {
 /** Optional app-provided UI rendered inside the call shell. Keeps business UI
  * (e.g. a peer-info / course-health panel) out of the core. */
 interface CallRenderSlots {
-    /** Rendered in the in-call header/toolbar area (e.g. peer info button). */
+    /** App business UI shown in the right-hand details panel (e.g. course health). */
     peerInfo?: ReactNode;
+    /** Title for the peerInfo panel header + its settings-popover toggle. Defaults to "Details". */
+    peerInfoTitle?: string;
+    /** Icon for the peerInfo toggle in the settings popover. Defaults to a gear. */
+    peerInfoIcon?: ReactNode;
     /** Rendered in the overflow menu (e.g. "share to device"). */
     overflowMenu?: ReactNode;
     /**

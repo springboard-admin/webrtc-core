@@ -3892,7 +3892,7 @@ var RtcCall = ({
       ] }),
       studentDetailsOpen && slots?.peerInfo && !isMobile && /* @__PURE__ */ jsxs("div", { className: "w-[380px] shrink-0 bg-white overflow-y-auto flex flex-col", children: [
         /* @__PURE__ */ jsxs("div", { className: "flex items-center justify-between px-4 py-3 border-b border-gray-200", children: [
-          /* @__PURE__ */ jsx("h3", { className: "text-sm font-semibold text-gray-900", children: "Details" }),
+          /* @__PURE__ */ jsx("h3", { className: "text-sm font-semibold text-gray-900", children: slots?.peerInfoTitle ?? "Details" }),
           /* @__PURE__ */ jsx(
             "button",
             {
@@ -4003,8 +4003,8 @@ var RtcCall = ({
                 setShowDevicePicker(false);
               },
               children: [
-                /* @__PURE__ */ jsx(Settings, { className: "h-3.5 w-3.5 mr-2" }),
-                studentDetailsOpen ? "Hide details" : "Details"
+                /* @__PURE__ */ jsx("span", { className: "mr-2 inline-flex", children: slots?.peerInfoIcon ?? /* @__PURE__ */ jsx(Settings, { className: "h-3.5 w-3.5" }) }),
+                studentDetailsOpen ? `Hide ${(slots?.peerInfoTitle ?? "details").toLowerCase()}` : slots?.peerInfoTitle ?? "Details"
               ]
             }
           ) }),

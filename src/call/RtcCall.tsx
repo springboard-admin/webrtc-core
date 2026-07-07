@@ -2911,7 +2911,7 @@ export const RtcCall = ({
       {studentDetailsOpen && slots?.peerInfo && !isMobile && (
         <div className="w-[380px] shrink-0 bg-white overflow-y-auto flex flex-col">
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-            <h3 className="text-sm font-semibold text-gray-900">Details</h3>
+            <h3 className="text-sm font-semibold text-gray-900">{slots?.peerInfoTitle ?? "Details"}</h3>
             <button
               type="button"
               onClick={() => setStudentDetailsOpen(false)}
@@ -3056,8 +3056,8 @@ export const RtcCall = ({
                       setShowDevicePicker(false);
                     }}
                   >
-                    <Settings className="h-3.5 w-3.5 mr-2" />
-                    {studentDetailsOpen ? "Hide details" : "Details"}
+                    <span className="mr-2 inline-flex">{slots?.peerInfoIcon ?? <Settings className="h-3.5 w-3.5" />}</span>
+                    {studentDetailsOpen ? `Hide ${(slots?.peerInfoTitle ?? "details").toLowerCase()}` : (slots?.peerInfoTitle ?? "Details")}
                   </Button>
                 </div>
               )}

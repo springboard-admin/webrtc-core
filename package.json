@@ -1,6 +1,6 @@
 {
   "name": "webrtc-core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Reusable WebRTC call core (media, signaling, resilience, telemetry, whiteboard, screen-share, in-call chat) for Canvas-LMS call apps.",
   "license": "MIT",
   "type": "module",
